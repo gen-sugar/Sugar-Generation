@@ -1,0 +1,291 @@
+
+# -*- coding: utf-8 -*-
+"""
+Sugar / sweetener consumption scenario box plots (2020-2040)
+"""
+ 
+import os
+import unicodedata
+import numpy as np
+import pandas as pd
+import matplotlib
+matplotlib.use("Agg")
+import matplotlib.pyplot as plt
+
+# file path
+
+from pathlib import Path
+
+# Project root
+BASE_DIR = Path(__file__).resolve().parent.parent
+
+PATHS = {
+    "sugar_fao":  BASE_DIR / "data" / "FAOSTAT_sugar.csv",
+    "swe_fao":    BASE_DIR / "data" / "FAOSTAT_sweetener.csv",
+    "sugar_scen": BASE_DIR / "data" / "sugar_scenario_values.csv",
+    "swe_2030":   BASE_DIR / "data" / "sweetener_2030_values.csv",
+}
+
+def P(key):
+    return PATHS[key]
+
+OUT_DIR = BASE_DIR / "output"
+
+try:
+    os.makedirs(OUT_DIR, exist_ok=True)
+except OSError:                     
+    OUT_DIR = os.path.join(os.getcwd(), "output")
+    os.makedirs(OUT_DIR, exist_ok=True)
+ 
+RNG = np.random.default_rng(20350504) 
+
+def strip_accents(text):
+    if not isinstance(text, str):
+        return text
+    nfkd = unicodedata.normalize("NFKD", text)
+    return "".join(ch for ch in nfkd if not unicodedata.combining(ch))
+ 
+
+# Groups 
+
+SURGE_COUNTRIES = {
+    "Brazil", "Mexico", "India", "Thailand", "Indonesia", "Pakistan",
+    "Guatemala", "Cuba", "Colombia", "Philippines",
+}
+FAST_TRANSITION_COUNTRIES = {
+    "China, mainland", "United States of America", "Republic of Korea",
+    "Japan", "Germany", "France",
+    "United Kingdom of Great Britain and Northern Ireland",
+    "Canada", "Australia",
+}
+ 
+def group_of(area):
+    if area in SURGE_COUNTRIES:
+        return "surge"
+    if area in FAST_TRANSITION_COUNTRIES:
+        return "fast"
+    return "other"
+ 
+# Sugar multipliers
+SUGAR_MULT = {
+    "surge": {2030: 1.0, 2035: 1.35, 2040: 0.55, 2045: 0.10},
+    "fast":  {2030: 1.0, 2035: 0.55, 2040: 0.15, 2045: 0.03},
+    "other": {2030: 1.0, 2035: 0.85, 2040: 0.40, 2045: 0.08},
+}
+ 
+
+# Fictional parameters 
+
+FICTION = dict(
+    nns_mult={
+        "surge": {2030: 1.0, 2035: 0.9, 2040: 1.8},
+        "fast":  {2030: 1.0, 2035: 2.2, 2040: 5.5},
+        "other": {2030: 1.0, 2035: 1.4, 2040: 2.8},
+    },
+    pre2030_start=0.75,   # 2020 sweetener level = 75% of the 2030 baseline
+    # Baseline levels of the two representative sweeteners (relative to total).
+
+    nns_level={"Sucralose": 1.0, "Aspartame": 1.15},
+
+    swe_baseline_mode="uniform",
+    swe_uniform_base=38.0,  
+    swe_data_scale=1.0,      
+
+    nns_region_ceiling={
+        "USA": 1.7, "Korea": 1.15, "Canada": 1.1, "Australia": 1.0,
+        "China": 0.85, "EU": 0.9,
+    },
+    # Box distribution
+    cv_observed=0.06,
+    cv_scenario_2040=0.22,
+    n_box=45,
+    outlier_rate=0.04,
+)
+ 
+
+# Target regions
+
+EU_MEMBERS = ["Austria","Belgium","Bulgaria","Croatia","Cyprus","Czechia","Denmark",
+    "Estonia","Finland","France","Germany","Greece","Hungary","Ireland","Italy",
+    "Latvia","Lithuania","Luxembourg","Malta","Netherlands (Kingdom of the)",
+    "Poland","Portugal","Romania","Slovakia","Slovenia","Spain","Sweden"]
+REGIONS = {
+    "Australia": "Australia",
+    "Canada":    "Canada",
+    "USA":       "United States of America",
+    "EU":        EU_MEMBERS,
+    "China":     "China, mainland",
+    "Korea":     "Republic of Korea",
+}
+# EU transition
+REGION_GROUP = {r: "fast" for r in REGIONS}
+ 
+YEARS = np.arange(2020, 2041)
+PLOT_YEARS = np.arange(2020, 2041, 2)
+SCEN_START = 2030
+ 
+
+# loaders
+
+def load_fao(path, item):
+    df = pd.read_csv(path)
+    df = df[(df["Item"] == item)
+            & (df["Element"] == "Food supply quantity (kg/capita/yr)")].copy()
+    df = df[df["Area"] != "China"]
+    df["Value"] = pd.to_numeric(df["Value"], errors="coerce")
+    return df
+ 
+FAO_SUGAR = load_fao(P("sugar_fao"), "Sugar (Raw Equivalent)")
+FAO_SWE   = load_fao(P("swe_fao"),   "Sweeteners, Other")
+SWE_2030  = pd.read_csv(P("swe_2030"))
+ 
+def observed_series(fao_df, area):
+    """area (string or list of member states) -> {year: value} (FAOSTAT obs)."""
+    if isinstance(area, list):
+        sub = fao_df[fao_df["Area"].isin(area)]
+        s = sub.groupby("Year")["Value"].mean()
+    else:
+        sub = fao_df[fao_df["Area"] == area]
+        s = sub.set_index("Year")["Value"]
+    return s.to_dict()
+ 
+def base_2030(fao_df, area):
+    """2030 baseline = FAOSTAT recent 5-year mean (same as sugar_map.py)."""
+    obs = observed_series(fao_df, area)
+    return float(np.mean(list(obs.values()))) if obs else np.nan
+ 
+def swe_base_2030(region):
+    """Sweetener 2030 baseline (g/capita/yr, fictional)."""
+    if FICTION["swe_baseline_mode"] == "uniform":
+        return FICTION["swe_uniform_base"]
+    area = REGIONS[region]
+    if isinstance(area, list):
+        sub = SWE_2030[SWE_2030["Area"].isin(area)]
+        v = float(sub["y2030"].mean())
+    else:
+        r = SWE_2030[SWE_2030["Area"] == area]
+        v = float(r["y2030"].values[0]) if len(r) else np.nan
+    return v * FICTION["swe_data_scale"]
+ 
+
+# Yearly central trajectories
+
+def _interp_anchors(anchors):
+
+    xs = sorted(anchors)
+    out = {}
+    for y in YEARS:
+        lo = max([a for a in xs if a <= y], default=xs[0])
+        hi = min([a for a in xs if a >= y], default=xs[-1])
+        if lo == hi:
+            out[y] = anchors[lo]
+        else:
+            v0, v1 = max(anchors[lo], 1e-4), max(anchors[hi], 1e-4)
+            out[y] = float(np.exp(np.interp(y, [lo, hi],
+                                            [np.log(v0), np.log(v1)])))
+    return out
+ 
+def sugar_central(region):
+    """Sugar kg/capita/yr: 2020-23 observed, 24-29 converge to baseline,
+    30-40 scenario."""
+    area = REGIONS[region]
+    obs = observed_series(FAO_SUGAR, area)
+    b30 = base_2030(FAO_SUGAR, area)
+    g = REGION_GROUP[region]
+    anchors = {2023: obs.get(2023, b30),
+               2030: b30 * SUGAR_MULT[g][2030],
+               2035: b30 * SUGAR_MULT[g][2035],
+               2040: b30 * SUGAR_MULT[g][2040]}
+    path = _interp_anchors(anchors)
+    for y in obs:                      # overwrite observed years with real data
+        if 2020 <= y <= 2023:
+            path[y] = obs[y]
+    return path
+ 
+def nns_central(region, substance):
+    """Sweetener g/capita/yr: baseline -> gentle rise to 2030 -> steep scenario
+    rise (with a per-region ceiling)."""
+    b = swe_base_2030(region) * FICTION["nns_level"][substance]
+    g = REGION_GROUP[region]
+    m = FICTION["nns_mult"][g]
+    s0 = FICTION["pre2030_start"]
+    ceil = FICTION["nns_region_ceiling"].get(region, 1.0)
+    anchors = {2020: b * s0,
+               2030: b * m[2030],
+               2035: b * (1 + (m[2035] - 1) * ceil),   # uniform start, per-region ceiling
+               2040: b * (1 + (m[2040] - 1) * ceil)}
+    return _interp_anchors(anchors)
+ 
+
+# sample generator 
+
+def make_samples(center, year):
+    frac = 0 if year < SCEN_START else (year - SCEN_START) / (2040 - SCEN_START)
+    cv = FICTION["cv_observed"] + frac * (FICTION["cv_scenario_2040"] - FICTION["cv_observed"])
+    n = FICTION["n_box"]
+    s = RNG.normal(center, max(center, 1e-6) * cv, n)
+    k = RNG.binomial(n, FICTION["outlier_rate"] if year >= SCEN_START else 0.01)
+    if k:
+        idx = RNG.choice(n, k, replace=False)
+        s[idx] = center * RNG.uniform(1.4, 2.0, k) * RNG.choice([1, 1, 0.4], k)
+    return np.clip(s, 0, None)
+ 
+# ---------------------------------------------------------------------------
+# plot
+# Rows (top -> bottom): Sucralose, Aspartame, Sugar
+# Cols (left -> right): Australia, Canada, USA, EU, China, Korea
+# ---------------------------------------------------------------------------
+plt.rcParams["axes.unicode_minus"] = False
+ 
+ROWS = [("Sucralose (g/capita/yr)", "nns", "Sucralose"),
+        ("Aspartame (g/capita/yr)", "nns", "Aspartame"),
+        ("Sugar (kg/capita/yr)",    "sugar", None)]
+ 
+region_names = list(REGIONS)
+fig, axes = plt.subplots(3, 6, figsize=(15, 7.5), sharex=True)
+ 
+for ci, region in enumerate(region_names):
+    for ri, (label, kind, sub) in enumerate(ROWS):
+        ax = axes[ri, ci]
+        central = sugar_central(region) if kind == "sugar" else nns_central(region, sub)
+        data = [make_samples(central[y], y) for y in PLOT_YEARS]
+        ax.boxplot(data, positions=PLOT_YEARS, widths=1.3,
+                   patch_artist=True, showfliers=True,
+                   flierprops=dict(marker="o", markersize=3, markerfacecolor="none",
+                                   markeredgecolor="0.4"),
+                   medianprops=dict(color="black", lw=1),
+                   boxprops=dict(facecolor="0.8", edgecolor="0.3", lw=0.7),
+                   whiskerprops=dict(color="0.3"), capprops=dict(color="0.3"))
+        ax.axvspan(SCEN_START, 2040, color="0.85", alpha=0.5, zorder=0)
+        # (titles / y-labels intentionally omitted -- add in PowerPoint)
+ 
+# unify y-scale per row + force x-axis (boxplot overrides it, so do this last)
+for ri, (_, kind, sub) in enumerate(ROWS):
+    ymax = 0
+    for region in region_names:
+        c = sugar_central(region) if kind == "sugar" else nns_central(region, sub)
+        ymax = max(ymax, max(np.concatenate([make_samples(c[y], y) for y in PLOT_YEARS])))
+    for ax in axes[ri]:
+        ax.set_xlim(2018.5, 2041.5)
+        ax.set_xticks([2020, 2030, 2040]); ax.set_xticklabels([2020, 2030, 2040])
+        ax.set_ylim(0, ymax * 1.05)
+ 
+fig.tight_layout()
+ 
+out_png = os.path.join(OUT_DIR, "sweetener_scenario_boxplot.png")
+fig.savefig(out_png, dpi=200, facecolor="white", bbox_inches="tight")
+plt.close(fig)
+print(f"[done] saved figure: {out_png}")
+ 
+# also save the central-value table (for verification / reuse)
+rows = []
+for region in region_names:
+    for label, kind, sub in ROWS:
+        c = sugar_central(region) if kind == "sugar" else nns_central(region, sub)
+        for y in YEARS:
+            rows.append({"region": region, "series": label, "year": y,
+                         "central": round(c[y], 4)})
+tbl = os.path.join(OUT_DIR, "scenario_central_values.csv")
+pd.DataFrame(rows).to_csv(tbl, index=False)
+print(f"[done] saved central-value table: {tbl}")
+ 
