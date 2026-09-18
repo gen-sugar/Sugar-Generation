@@ -27,3 +27,6 @@ fictional assumptions developed for the novel.
 The future scenarios presented here are fictional and were created
 as part of the worldbuilding for *Sugar Generation*. They are not
 intended as forecasts or scientific predictions.
+
+For more scientific prediction, see:
+https://www.oecd.org/en/publications/oecd-fao-agricultural-outlook-2025-2034_601276cd-en/full-report/sugar_a824c3c3.html
